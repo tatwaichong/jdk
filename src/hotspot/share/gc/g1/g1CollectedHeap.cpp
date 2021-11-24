@@ -1310,7 +1310,7 @@ bool G1CollectedHeap::expand(size_t expand_bytes, WorkerThreads* pretouch_worker
       vm_exit_out_of_memory(aligned_expand_bytes, OOM_MMAP_ERROR, "G1 heap expansion");
     }
   }
-  return regions_to_expand > 0;
+  return expanded_by > 0;
 }
 
 bool G1CollectedHeap::expand_single_region(uint node_index) {
@@ -1660,7 +1660,7 @@ jint G1CollectedHeap::initialize() {
 
   // The G1FromCardCache reserves card with value 0 as "invalid", so the heap must not
   // start within the first card.
-  guarantee(heap_rs.base() >= (char*)G1CardTable::card_size, "Java heap must not start within the first card.");
+  guarantee((uintptr_t)(heap_rs.base()) >= G1CardTable::card_size, "Java heap must not start within the first card.");
   G1FromCardCache::initialize(max_reserved_regions());
   // Also create a G1 rem set.
   _rem_set = new G1RemSet(this, _card_table, _hot_card_cache);
@@ -1828,7 +1828,6 @@ void G1CollectedHeap::ref_processing_init() {
                            ParallelGCThreads,                              // degree of mt processing
                            // We discover with the gc worker threads during Remark, so both
                            // thread counts must be considered for discovery.
-                           (ParallelGCThreads > 1) || (ConcGCThreads > 1), // mt discovery
                            MAX2(ParallelGCThreads, ConcGCThreads),         // degree of mt discovery
                            true,                                           // Reference discovery is concurrent
                            &_is_alive_closure_cm);                         // is alive closure
@@ -1837,7 +1836,6 @@ void G1CollectedHeap::ref_processing_init() {
   _ref_processor_stw =
     new ReferenceProcessor(&_is_subject_to_discovery_stw,
                            ParallelGCThreads,                    // degree of mt processing
-                           (ParallelGCThreads > 1),              // mt discovery
                            ParallelGCThreads,                    // degree of mt discovery
                            false,                                // Reference discovery is not concurrent
                            &_is_alive_closure_stw);              // is alive closure
@@ -2262,7 +2260,7 @@ void G1CollectedHeap::object_iterate(ObjectClosure* cl) {
   heap_region_iterate(&blk);
 }
 
-class G1ParallelObjectIterator : public ParallelObjectIterator {
+class G1ParallelObjectIterator : public ParallelObjectIteratorImpl {
 private:
   G1CollectedHeap*  _heap;
   HeapRegionClaimer _claimer;
@@ -2277,7 +2275,7 @@ public:
   }
 };
 
-ParallelObjectIterator* G1CollectedHeap::parallel_object_iterator(uint thread_num) {
+ParallelObjectIteratorImpl* G1CollectedHeap::parallel_object_iterator(uint thread_num) {
   return new G1ParallelObjectIterator(thread_num);
 }
 
@@ -2693,15 +2691,15 @@ bool G1CollectedHeap::is_potential_eager_reclaim_candidate(HeapRegion* r) const 
 }
 
 #ifndef PRODUCT
-void G1CollectedHeap::verify_region_attr_remset_update() {
+void G1CollectedHeap::verify_region_attr_remset_is_tracked() {
   class VerifyRegionAttrRemSet : public HeapRegionClosure {
   public:
     virtual bool do_heap_region(HeapRegion* r) {
       G1CollectedHeap* g1h = G1CollectedHeap::heap();
-      bool const needs_remset_update = g1h->region_attr(r->bottom()).needs_remset_update();
-      assert(r->rem_set()->is_tracked() == needs_remset_update,
+      bool const remset_is_tracked = g1h->region_attr(r->bottom()).remset_is_tracked();
+      assert(r->rem_set()->is_tracked() == remset_is_tracked,
              "Region %u remset tracking status (%s) different to region attribute (%s)",
-             r->hrm_index(), BOOL_TO_STR(r->rem_set()->is_tracked()), BOOL_TO_STR(needs_remset_update));
+             r->hrm_index(), BOOL_TO_STR(r->rem_set()->is_tracked()), BOOL_TO_STR(remset_is_tracked));
       return false;
     }
   } cl;
@@ -3293,6 +3291,7 @@ void G1CollectedHeap::retire_gc_alloc_region(HeapRegion* alloc_region,
   _bytes_used_during_gc += allocated_bytes;
   if (dest.is_old()) {
     old_set_add(alloc_region);
+    alloc_region->update_bot_threshold();
   } else {
     assert(dest.is_young(), "Retiring alloc region should be young (%d)", dest.type());
     _survivor.add_used_bytes(allocated_bytes);
@@ -3444,4 +3443,9 @@ GrowableArray<GCMemoryManager*> G1CollectedHeap::memory_managers() {
 
 GrowableArray<MemoryPool*> G1CollectedHeap::memory_pools() {
   return _monitoring_support->memory_pools();
+}
+
+void G1CollectedHeap::fill_with_dummy_object(HeapWord* start, HeapWord* end, bool zap) {
+  HeapRegion* region = heap_region_containing(start);
+  region->fill_with_dummy_object(start, pointer_delta(end, start), zap);
 }
